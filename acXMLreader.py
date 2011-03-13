@@ -1,4 +1,7 @@
 #!/usr/bin/python
+"""
+acXMLreader.py : Reads in arrayconfig files from naviseccli and parses to SQLite database
+"""
 
 from xml.etree import ElementTree
 import DBSetup as DBConfig
