@@ -13,8 +13,6 @@ namespace_uri_template = {"SAN": "{http://navisphere.us.dg.com/docs/Schemas/Comm
                           "CLAR": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}%s",
                           "FILEMETADATA": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_Type_schema}%s"}
 
-
-
 DBConfig.setup_sqlite_tables()
 
 array_block_size = 512   # This seems to be the standard from EMC.....

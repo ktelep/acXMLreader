@@ -197,6 +197,29 @@ class acXMLreader():
             self.dbconn.commit()
 
             # Locate associated disks
+            drive_root = group.find(namespace_uri_template['CLAR'] % ('Disks'))
+            location_list = []
+	    for disk in drive_root:
+                bus = None
+		enclosure = None
+		slot = None
+		for tag in disk:
+                    if tag.tag.endswith('Bus'):
+                        bus=tag.text
+                    elif tag.tag.endswith('Enclosure'):
+                        enclosure = tag.text
+		    elif tag.tag.endswith('Slot'):
+			slot = tag.text
+
+                location_list.append('_'.join([str(bus),str(enclosure),str(slot)]))
+
+           # Pull our physical drives from the DB that are in the locations and set the RAID ID
+	   raid_group_drives = self.dbconn.query(db_layer.Drive).filter(db_layer.Drive.Location.in_(location_list))
+	   for drive in raid_group_drives.all():
+	       #Need to set the RGID here
+	       drive.RaidID =
+
+
 
 
 
