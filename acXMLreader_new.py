@@ -1,4 +1,4 @@
-#!/usr/local/bin/python
+#!/usr/bin/env python
 
 from xml.etree import ElementTree
 import dblayer as db_layer
@@ -9,16 +9,11 @@ namespace_uri_template = {"SAN": "{http://navisphere.us.dg.com/docs/Schemas/Comm
                           "CLAR": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}%s",
                           "FILEMETADATA": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_Type_schema}%s"}
 
-# EMC has standardized on a 512-byte block size for their data, but for some
-# reason it looks like there are some arrays that take 1024...  
-# TODO: Need to figure out which arrays are 512 byte blocks vs. 1024
-#       Maybe when we pull drives, we see if there's a sizeMB tag and divide it
-#       by blocks?
 
-emc_block_size = 1024
+emc_block_size = 512
+emc_drive_block_size = 1024 * 1024
 
-# TODO: really gotta true these up...
-emc_rg_types = {'32':'RAID1',
+emc_rg_types = {'32':'HotSpare',
                 '1' : 'RAID5',
                 '64': 'RAID1/0'}
 
@@ -156,7 +151,7 @@ class acXMLreader():
                     elif xml_tag.tag.endswith('Type'):
                         new_drive.drive_type = xml_tag.text
                     elif xml_tag.tag.endswith('UserCapacityInBlocks'):
-                        new_drive.capacity = int(xml_tag.text) * emc_block_size 
+                        new_drive.capacity = int(xml_tag.text) * emc_drive_block_size 
                     elif xml_tag.tag.endswith('Vendor'):
                         new_drive.manufacturer = xml_tag.text
                     elif xml_tag.tag.endswith('Product'):
@@ -192,7 +187,7 @@ class acXMLreader():
                     new_raid_group.total_size = int(xml_tag.text)
                 elif xml_tag.tag.endswith('FreeSpace'):
                     new_raid_group.free_size = int(xml_tag.text)
-                elif xml_tag.tag.endswith('LargestUnbound'):
+                elif xml_tag.tag.endswith('LargestUnboundSegmentSize'):
                     new_raid_group.highest_contig_free = int(xml_tag.text)
 
             self.dbconn.add(new_raid_group)
@@ -201,33 +196,33 @@ class acXMLreader():
             # Locate associated disks
             drive_root = group.find(namespace_uri_template['CLAR'] % ('Disks'))
             location_list = []
-	    for disk in drive_root:
+            for disk in drive_root:
                 bus = None
-		enclosure = None
-		slot = None
-		for tag in disk:
+                enclosure = None
+                slot = None
+                for tag in disk:
                     if tag.tag.endswith('Bus'):
                          bus=tag.text
                     elif tag.tag.endswith('Enclosure'):
                         enclosure = tag.text
-		    elif tag.tag.endswith('Slot'):
-			slot = tag.text
+                    elif tag.tag.endswith('Slot'):
+                        slot = tag.text
 
                 location_list.append('_'.join([str(bus),str(enclosure),str(slot)]))
 
             # Pull our physical drives from the DB that are in the locations and set the RAID ID
-	    raid_group_drives = self.dbconn.query(db_layer.Drive).filter(db_layer.Drive.location.in_(location_list))
-	    for drive in raid_group_drives.all():
-	        drive.RaidID = new_raid_group.rid
+	        raid_group_drives = self.dbconn.query(db_layer.Drive).filter(db_layer.Drive.location.in_(location_list))
+	        for drive in raid_group_drives.all():
+	            drive.raidgroup = new_raid_group
+            self.dbconn.commit()
 
-            # Find our LUNs and map them for later assignment to the RAID grou
+            # Find our LUNs and map them for later assignment to the RAID group
             raid_group_lun_root = group.find(namespace_uri_template['CLAR'] % ('LUNs'))
             for lun in raid_group_lun_root:
                 for tag in lun:
                     if tag.tag.endswith('}WWN'):
                         self.rg_to_lun_map[tag.text] = new_raid_group.group_number
    
-            self.dbconn.commit()
 
     def _locate_logical_luns(self):
         clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
@@ -259,14 +254,14 @@ class acXMLreader():
                         new_lun.default_owner='A'
                 elif tag.tag.endswith('ReadCacheEnabled'):
                     if tag.text == 'true':
-                        new_lun.read_cache_enabled = 1
+                        new_lun.is_read_cache_enabled = 1
                     else:
-                        new_lun.read_cache_enabled = 0
+                        new_lun.is_read_cache_enabled = 0
                 elif tag.tag.endswith('WriteCacheEnabled'):
                     if tag.text == 'true':
-                        new_lun.write_cache_enabled = 1
+                        new_lun.is_write_cache_enabled = 1
                     else:
-                        new_lun.write_cache_enabled = 0
+                        new_lun.is_write_cache_enabled = 0
 
             self.dbconn.add(new_lun)
 
@@ -274,9 +269,11 @@ class acXMLreader():
             raid_group = self.dbconn.query(db_layer.RAIDGroup).filter(
                                       db_layer.RAIDGroup.group_number==self.rg_to_lun_map[new_lun.wwn]).first()
 
+            raid_group.luns.append(new_lun)
+
             self.dbconn.commit()
 
-    def _locate_meta_luns():
+    def _locate_meta_luns(self):
         # MetaLUNs are added into the LUNs table, but have the isMeta,
         # isMetaHead, and MetaHead properties set        
         clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
@@ -286,8 +283,7 @@ class acXMLreader():
         for meta in metaluns:
             new_meta_head = db_layer.LUN()
             new_meta_head.is_meta_head = 1
-            new_meta_head.is_meta_member = 0
-            for tag in lun:
+            for tag in meta:
                 if tag.tag.endswith('Number'):
                     new_meta_head.alu = int(tag.text)
                 elif tag.tag.endswith('}Name'):
@@ -318,6 +314,7 @@ class acXMLreader():
                 raid_group.luns.append(new_meta_head)
 
             self.dbconn.commit()
+    #TODO:  Process Meta components!
 
     def _locate_connected_hbas(self):
         clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
@@ -343,8 +340,53 @@ class acXMLreader():
 
   
     def _locate_storage_groups(self):
-        pass 
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
+        storage_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('StorageGroups'))
 
+        for group in storage_groups:
+            new_storage_group = db_layer.StorageGroup()
+
+            for tag in group:
+                if tag.tag.endswith('Name'):
+                    new_storage_group.name = tag.text
+                elif tag.tag.endswith('WWN'):
+                    new_storage_group.wwn = tag.text
+
+            self.dbconn.add(new_storage_group)
+            self.dbconn.commit()
+
+            # find all our hosts and add them to the storage group
+            sg_hba_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('ConnectedHBA') +
+                                                '/' + namespace_uri_template['CLAR'] % ('WWN'))
+
+            if sg_hba_connections is not None:
+                for connection in sg_hba_connections:
+                    server = self.dbconn.query(db_layer.Host).filter(db_layer.HostWWN.host_id==db_layer.Host.id).filter(db_layer.HostWWN.wwn==connection.text).first()
+
+                    new_storage_group.host.append(server)
+                    self.dbconn.commit()
+
+            sg_lu_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('LUs') +
+                                              '/' + namespace_uri_template['CLAR'] % ('LU'))
+
+            if sg_lu_connections is not None:
+                for lu in sg_lu_connections:
+                    lun_wwn = None
+                    hlu = None
+
+                    for lun_connection in lu:
+
+                        if lun_connection.tag.endswith('WWN'):
+                            lun_wwn = lun_connection.text
+                        elif 'Virtual' in lun_connection.tag:
+                            hlu = int(lun_connection.text)
+
+                    # Set the LUN parameters and the storage group
+                    attached_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==lun_wwn).one()
+                    attached_lun.hlu = hlu
+                    new_storage_group.luns.append(attached_lun) 
+                    self.dbconn.commit()
 
     def parse(self):
         self._locate_server_physical()
@@ -352,11 +394,12 @@ class acXMLreader():
         self._locate_clariion_drives()
         self._locate_logical_raidgroups()
         self._locate_logical_luns()
+        self._locate_meta_luns()
         self._locate_connected_hbas()
         self._locate_storage_groups()
 
 
 
 if __name__ == "__main__":
-    clar = acXMLreader('/Users/ktelep/src/acXMLreader/testdata/arrayconfig.sannas.xml')
+    clar = acXMLreader('./testdata/arrayconfig.sannas.xml')
     clar.parse()

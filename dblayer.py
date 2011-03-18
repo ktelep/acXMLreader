@@ -3,8 +3,8 @@ from sqlalchemy.orm import mapper, sessionmaker, relation, backref
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
-db = create_engine('sqlite:///:memory:', echo=False)
-#db = create_engine('sqlite:////tmp/test.db', echo=False)
+#db = create_engine('sqlite:///:memory:', echo=True)
+db = create_engine('sqlite:////tmp/test.db', echo=False)
 
 
 class RAIDGroup(Base):
@@ -12,10 +12,10 @@ class RAIDGroup(Base):
 
     rid = Column('RaidID', Integer, primary_key=True, autoincrement=True)
     group_number = Column('RaidGroupID', Integer)
-    raid_type = Column('Type', String(255))
-    total_size = Column('TotalSize', Integer)
-    free_size = Column('FreeSize', Integer)
-    highest_contig_free = Column('HighestContigFree', Integer)
+    raid_type = Column('Type', String(25))
+    total_size = Column('TotalSize', BigInteger)
+    free_size = Column('FreeSize', BigInteger)
+    highest_contig_free = Column('HighestContigFree', BigInteger)
     luns = relation('LUN', backref='raid_group')
 
     def __init__(self):
@@ -90,7 +90,7 @@ class Host(Base):
     name = Column('Name', String(60))
     ip = Column('IP', String(20))
     manual_registration = ('ManualReg', SMALLINT)
-    storage_group_wwn = Column('StorageGroup', Integer,
+    storage_group_wwn = Column('StorageGroup', String(255),
                                ForeignKey('StorageGroup.SGWWN'))
 
     def __init__(self):
@@ -106,9 +106,9 @@ class LUN(Base):
 
     wwn = Column('WWN', String(50), primary_key=True)
     alu = Column('ALU', Integer)
-    name = Column('Name', Integer)
-    state = Column('State', Integer)
-    capacity = Column('Capacity', Integer)
+    name = Column('Name', String(50))
+    state = Column('State', String(50))
+    capacity = Column('Capacity', BigInteger)
     current_owner = Column('Ownership', String(5))
     default_owner = Column('DefaultOwner', String(5))
     is_read_cache_enabled = Column('ReadCacheEnabled', SMALLINT)
@@ -119,6 +119,8 @@ class LUN(Base):
     raidgroup_id = Column('RaidID', Integer, ForeignKey('RAIDGroup.RaidID'))
     storage_group_wwn = Column('StorageGroup', Integer,
                                ForeignKey('StorageGroup.SGWWN'))
+    hlu = Column('HLU', Integer)
+
 
     def __init__(self):
         pass
@@ -135,7 +137,7 @@ class FrameSoftware(Base):
     frame_id = Column('FrameID', Integer, ForeignKey('Frame.FrameID'))
     frame = relation('Frame',  backref='software')
     name = Column('Name', String(25))
-    rev = Column('Revision', String(10))
+    rev = Column('Revision', String(20))
     status = Column('Status', String(25))
 
     def __init__(self):
@@ -152,7 +154,7 @@ class Drive(Base):
     rid = Column('DriveID', Integer, primary_key=True, autoincrement=True)
     location = Column('Location', String(25))
     drive_type = Column('Type', String(25))
-    capacity = Column('RawCapacity', Integer)
+    capacity = Column('RawCapacity', BigInteger)
     manufacturer = Column('Manufacture', String(255))
     model = Column('Model', String(25))
     firmware = Column('Firmware', String(45))
