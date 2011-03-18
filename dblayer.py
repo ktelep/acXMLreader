@@ -3,7 +3,8 @@ from sqlalchemy.orm import mapper, sessionmaker, relation, backref
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
-db = create_engine('sqlite:///:memory:', echo=True)
+db = create_engine('sqlite:///:memory:', echo=False)
+#db = create_engine('sqlite:////tmp/test.db', echo=False)
 
 
 class RAIDGroup(Base):
@@ -67,7 +68,7 @@ class Frame(Base):
         return "Frame<'%s'>" % repr_string
 
 
-def HostWWN(Base):
+class HostWWN(Base):
     __tablename__ = 'hostwwns'
 
     id = Column(Integer, autoincrement=True, primary_key=True)
@@ -91,7 +92,6 @@ class Host(Base):
     manual_registration = ('ManualReg', SMALLINT)
     storage_group_wwn = Column('StorageGroup', Integer,
                                ForeignKey('StorageGroup.SGWWN'))
-    #wwns = relation('HostWWN',backref="host")
 
     def __init__(self):
         pass
