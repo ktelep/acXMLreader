@@ -34,6 +34,7 @@ class StorageGroup(Base):
     __tablename__ = 'StorageGroup'
 
     name = Column('SGName', String(255))
+    category = Column('category', String(255))
     wwn = Column('SGWWN', String(255), primary_key=True)
     luns = relation('LUN', backref='storage_group')
     host = relation('Host', backref='storage_group')

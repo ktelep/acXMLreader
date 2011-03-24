@@ -314,7 +314,19 @@ class acXMLreader():
                 raid_group.luns.append(new_meta_head)
 
             self.dbconn.commit()
-    #TODO:  Process Meta components!
+
+            component_luns = meta.findall('/'.join((namespace_uri_template['CLAR'] % ('Components'),
+                                      namespace_uri_template['CLAR'] % ('Component'),
+                                      namespace_uri_template['CLAR'] % ('LUNs'))))
+
+            for lun in component_luns:
+                wwns = lun.findall('.//' + namespace_uri_template['CLAR'] % ('WWN'))
+                for wwn in wwns:
+                    member_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==wwn.text).one()
+                    member_lun.is_meta_member = 1
+                    member_lun.meta_head = new_meta_head.wwn
+
+                self.dbconn.commit()
 
     def _locate_connected_hbas(self):
         clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
