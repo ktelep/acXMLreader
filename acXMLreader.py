@@ -1,393 +1,429 @@
-#!/usr/bin/python
-"""
-acXMLreader.py : Reads in arrayconfig files from naviseccli and parses to SQLite database
-"""
+#!/usr/bin/env python
 
 from xml.etree import ElementTree
-import DBSetup as DBConfig
+import dblayer as db_layer
 import re
 
-xml_file = './testdata/arrayconfig.slough.xml'
-
+# EMC Namespaces
 namespace_uri_template = {"SAN": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_SAN_schema}%s",
                           "CLAR": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}%s",
                           "FILEMETADATA": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_Type_schema}%s"}
 
-DBConfig.setup_sqlite_tables()
 
-array_block_size = 512   # This seems to be the standard from EMC.....
+emc_block_size = 512
 
-# We're gonna strip a lot of tag names here..., and this Regex kinda looks like boobs
-getTagName = re.compile(r'{.*}(.*)')
+emc_rg_types = {'32':'HotSpare',
+                '1' : 'RAID5',
+                '64': 'RAID1/0'}
 
-tree = ElementTree.parse(xml_file)
-root = tree.getroot()
+class acXMLreader():
+    """reads and parses xml file into database structure"""
 
-# Locate Attached Servers
-attached_servers = tree.find('.//' + namespace_uri_template['SAN'] % ('Servers'))
-for server in attached_servers:
-    hostname = None
-    ip = None
-    manual_registration = None
-    clariion_hostid = None
+    def __init__(self,array_config_xml=None):
 
-    for tag in server:
-        if tag.attrib['type'] == 'Property':
-            m = getTagName.match(tag.tag)
-            serverAttrib = m.group(1)
-            if 'HostName' in serverAttrib:
-                hostname = tag.text
-            elif 'HostIPAddress' in serverAttrib:
-                ip = tag.text
-            elif 'HostID' in serverAttrib:
-                if 'MANUAL' in tag.text:
-                    manual_registration = 1
+        self.array_config_xml=array_config_xml
+        self.schema_major_version = None
+        self.schema_minor_version = None
+        self.dbconn = db_layer.session
+        self.frame_serial = None
+        self.rg_to_lun_map = dict()
+
+        try: 
+            self.tree = ElementTree.parse(self.array_config_xml)
+        except IOError:
+            print "Unable to read and/or access file %s" % (self.array_config_xml)
+            exit()
+
+        schema_major = self.tree.find('.//' + namespace_uri_template['FILEMETADATA'] % ('MajorVersion'))
+        schema_minor = self.tree.find('.//' + namespace_uri_template['FILEMETADATA'] % ('MinorVersion'))
+        self.schema_major_version = schema_major.text
+        self.schema_minor_version = schema_minor.text
+
+    def __repr__(self):
+        return "acXMLreader<EMC XML Schema Major: %s Minor %s>" % (self.schema_major_version, self.schema_minor_version)
+
+    def _locate_server_physical(self):
+        """
+        Locate attached physical servers in the configuration
+        """
+        attached_servers = self.tree.find('.//' + namespace_uri_template['SAN'] % ('Servers'))
+        for server in attached_servers:
+            new_server = db_layer.Host()
+
+            for xml_tag in server:
+                if xml_tag.tag.endswith('HostName'):
+                    new_server.name = xml_tag.text
+                elif xml_tag.tag.endswith('HostIPAddress'):
+                    new_server.ip = xml_tag.text
+                elif xml_tag.tag.endswith('HostID'):
+                    new_server.id = xml_tag.text
+                    if 'MANUAL' in xml_tag.text:
+                        new_server.manual_registration = 1
+                    else:
+                        new_server.manual_registration = 0
+
+            self.dbconn.add(new_server)
+            self.dbconn.commit()
+    
+    def _locate_clariion_info(self):
+        """
+        Locate and create objects for base frame information and software
+        """
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        if clariion_root is not None:
+            clar = db_layer.Frame()
+
+            # Base info
+            serial_num = clariion_root.find(namespace_uri_template['CLAR'] % 'SerialNumber')
+            model = clariion_root.find(namespace_uri_template['CLAR'] % ('ModelNumber'))
+            hwm = clariion_root.find(namespace_uri_template['CLAR'] % ('HighWatermark'))
+            lwm = clariion_root.find(namespace_uri_template['CLAR'] % ('LowWatermark'))
+            wwn = clariion_root.find(namespace_uri_template['CLAR'] % ('WWN'))
+
+            clar.serial_number = serial_num.text
+            self.frame_serial = serial_num.text
+            clar.model=model.text
+            clar.cache_hwm = hwm.text
+            clar.cache_lwm = lwm.text
+            clar.wwn = wwn.text
+
+            # SP IP addresses
+            sps = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('StorageProcessors'))
+            for sp in sps:
+                ip = sp.find(namespace_uri_template['CLAR'] % ('IPAddress'))
+                name = sp.find(namespace_uri_template['CLAR'] % ('Name'))
+                if 'A' in name.text:
+                    clar.spa_ip=ip.text
                 else:
-                    manual_registration = 0
-                clariion_hostid = tag.text
+                    clar.spb_ip=ip.text
 
-    new_server = DBConfig.Host(hostname,ip,manual_registration,clariion_hostid)
-    DBConfig.session.add(new_server)
-    DBConfig.session.commit()
-    
+            self.dbconn.add(clar)
+            self.dbconn.commit()
 
-# Find the Clariion
-clariion_root = tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
-if clariion_root is not None:
+            # Installed Frame Software
+            softwares = clariion_root.find(namespace_uri_template['CLAR'] % ('Softwares'))
+            for installed_package in softwares:
+                name = installed_package.find(namespace_uri_template['CLAR'] % ('Name'))
 
-    # our base information
-    serial_num = clariion_root.find('.//' + namespace_uri_template['CLAR'] % 'SerialNumber')
-    model = clariion_root.find('.//' + namespace_uri_template['CLAR'] % ('ModelNumber'))
-    hwm = clariion_root.find(namespace_uri_template['CLAR'] % ('HighWatermark'))
-    lwm = clariion_root.find(namespace_uri_template['CLAR'] % ('LowWatermark'))
-    wwn = clariion_root.find(namespace_uri_template['CLAR'] % ('WWN'))
+                if name.text.startswith('-'):
+                    continue
 
+                ver = installed_package.find(namespace_uri_template['CLAR'] % ('Revision'))
+                status = installed_package.find(namespace_uri_template['CLAR'] % ('IsActive'))
 
-    # Frame Physical Configuration
-    sps = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('StorageProcessors'))
-    spa_ip = None
-    spb_ip = None
-    for sp in sps:
-        name = sp.find(namespace_uri_template['CLAR'] % ('IPAddress'))
-        IP = sp.find(namespace_uri_template['CLAR'] % ('Name'))
-        if 'A' in name:
-            spa_ip=IP.text
-        else:
-            spb_IP=IP.text
+                if 'true' in status.text:
+                    status = 'Active'
+                else:
+                    status = 'InActive'
 
-    clar = DBConfig.Frame(serial_num.text,model.text,spa_ip,spb_ip,hwm.text,lwm.text,wwn.text)
-    DBConfig.session.add(clar)
-    
+                package = db_layer.FrameSoftware()
+                package.name = name.text
+                package.rev = ver.text
+                package.frame = clar
+                package.status= status
 
-    # Frame Software Info
-    softwares = clariion_root.find(namespace_uri_template['CLAR'] % ('Softwares'))
-    for installed_package in softwares:
-        name = installed_package.find(namespace_uri_template['CLAR'] % ('Name'))
+                self.dbconn.add(package)
 
-        if name.text.startswith('-'):
-            continue
+            self.dbconn.commit() 
 
-        ver = installed_package.find(namespace_uri_template['CLAR'] % ('Revision'))
-        status = installed_package.find(namespace_uri_template['CLAR'] % ('IsActive'))
+    def _locate_clariion_drives(self):
+        clariion = self.dbconn.query(db_layer.Frame).filter(db_layer.Frame.serial_number==self.frame_serial).one()
 
-        if 'true' in status:
-            status = 'Active'
-        else:
-            status = 'InActive'
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        if clariion_root is not None:
+            drives = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('Disks'))
+            for drive in drives:
 
-        package = DBConfig.FrameSoftware(name.text,ver.text,status)
-        clar.software.append(package)
+                new_drive = db_layer.Drive()
 
-    DBConfig.session.commit()
+                bus = None
+                enc = None
+                slot = None
 
-    
-    drives = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('Disks'))
-    for drive in drives:
-        bus = None
-        enclosure = None
-        slot = None
-        vendor = None
-        capacity = None
-        model = None
-        firmware = None
-        TLAPartNum = None
-        speed = None
-        location = None
-        type = None
+                for xml_tag in drive:
+                    if xml_tag.tag.endswith('Bus'):
+                        bus = xml_tag.text
+                    elif xml_tag.tag.endswith('Enclosure'):
+                        enc = xml_tag.text
+                    elif xml_tag.tag.endswith('Slot'):
+                        slot = xml_tag.text
+                    elif xml_tag.tag.endswith('Type'):
+                        new_drive.drive_type = xml_tag.text
+                    elif xml_tag.tag.endswith('UserCapacityInBlocks'):
+                        if int(xml_tag.text) < 10000000:   # Correct for BUG in some versions on Unisphere CLI
+                            new_drive.capacity = int(xml_tag.text) * 1024 * 1024
+                        else:
+                            new_drive.capacity = int(xml_tag.text) * emc_block_size
+                    elif xml_tag.tag.endswith('Vendor'):
+                        new_drive.manufacturer = xml_tag.text
+                    elif xml_tag.tag.endswith('Product'):
+                        new_drive.model = xml_tag.text
+                    elif xml_tag.tag.endswith('ProductRevision'):
+                        new_drive.firmware = xml_tag.text
+                    elif xml_tag.tag.endswith('TLANumber'):
+                        new_drive.tla_part_num = xml_tag.text
+                    elif xml_tag.tag.endswith('CurrentSpeed'):
+                        new_drive.speed = int(xml_tag.text)
 
-        for tag in drive:
-            if tag.attrib['type'] == 'Property':
-                m = getTagName.match(tag.tag)
-                serverAttrib = m.group(1)
-                if serverAttrib.endswith('Bus'):
-                    bus = tag.text
-                elif 'Enclosure' in serverAttrib:
-                    enclosure = tag.text
-                elif 'Slot' in serverAttrib:
-                    slot = tag.text
-                elif 'Type' in serverAttrib:
-                    type = tag.text
-                elif 'UserCapacity' in serverAttrib:
-                    capacity = int(tag.text) * array_block_size
-                elif 'Vendor' in serverAttrib:
-                    vendor = tag.text
-                elif serverAttrib.endswith('Product'):
-                    model = tag.text
-                elif 'ProductRevision' in serverAttrib:
-                    firmware = tag.text
-                elif 'TLANumber' in serverAttrib:
-                    TLAPartNum = tag.text
-                elif 'CurrentSpeed' in serverAttrib:
-                    speed = tag.text
+                new_drive.location = '_'.join([str(bus),str(enc),str(slot)])
+                new_drive.frame = clariion
 
-        
-        location = '_'.join([str(bus),str(enclosure),str(slot)])
+                self.dbconn.add(new_drive)
 
-        new_drive = DBConfig.Drive(location,type,capacity,vendor,model,firmware,TLAPartNum,speed)
-        DBConfig.session.add(new_drive)
-        clar.drives.append(new_drive)
+            self.dbconn.commit()
 
-    DBConfig.session.commit()
+    def _locate_logical_raidgroups(self):
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))
+        raid_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('RAIDGroups'))
 
-    # Now we need to start working on the Logical items
-    logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))
+        for group in raid_groups:
 
-    # RAIDGroups
-    raid_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('RAIDGroups'))
+            new_raid_group = db_layer.RAIDGroup()
+            for xml_tag in group:
+                if xml_tag.tag.endswith('}ID'):
+                    new_raid_group.group_number = int(xml_tag.text)
+                elif xml_tag.tag.endswith('Type'):
+                    new_raid_group.raid_type = emc_rg_types[xml_tag.text]
+                elif xml_tag.tag.endswith('Capacity'):
+                    new_raid_group.total_size = int(xml_tag.text)
+                elif xml_tag.tag.endswith('FreeSpace'):
+                    new_raid_group.free_size = int(xml_tag.text)
+                elif xml_tag.tag.endswith('LargestUnboundSegmentSize'):
+                    new_raid_group.highest_contig_free = int(xml_tag.text)
 
-    rgtypes = {'32':'RAID5','1':'RAID1', '64': 'RAID1/0'}
-    lun_wwn_map = dict()
+            self.dbconn.add(new_raid_group)
+            self.dbconn.commit()
 
-    for group in raid_groups:
-        rgid = None
-        type = None
-        totalsize = None
-        freesize = None
-        hgfs = None
+            # Locate associated disks
+            drive_root = group.find(namespace_uri_template['CLAR'] % ('Disks'))
+            location_list = []
+            for disk in drive_root:
+                bus = None
+                enclosure = None
+                slot = None
+                for tag in disk:
+                    if tag.tag.endswith('Bus'):
+                         bus=tag.text
+                    elif tag.tag.endswith('Enclosure'):
+                        enclosure = tag.text
+                    elif tag.tag.endswith('Slot'):
+                        slot = tag.text
 
-        for tag in group:
-            if tag.attrib['type'] == 'Property':
-                m = getTagName.match(tag.tag)
-                serverAttrib = m.group(1)
-                if 'ID' in serverAttrib:
-                    rgid = tag.text
-                elif 'Type' in serverAttrib:
-                    type = rgtypes[tag.text]
-                elif 'Capacity' in serverAttrib:
-                    totalsize = int(tag.text) * array_block_size
-                elif 'FreeSpace' in serverAttrib:
-                    freesize = int(tag.text) * array_block_size
-                elif 'LargestUnbound' in serverAttrib:
-                    hgfs = int(tag.text) * array_block_size
+                location_list.append('_'.join([str(bus),str(enclosure),str(slot)]))
 
-        new_raidgroup = DBConfig.RAIDGroup(rgid,type,totalsize,freesize,hgfs)
-        DBConfig.session.add(new_raidgroup)
-        DBConfig.session.commit()
+            # Pull our physical drives from the DB that are in the locations and set the RAID ID
+	        raid_group_drives = self.dbconn.query(db_layer.Drive).filter(db_layer.Drive.location.in_(location_list))
+	        for drive in raid_group_drives.all():
+	            drive.raidgroup = new_raid_group
+            self.dbconn.commit()
 
-        # Find all the disks that should be in the associated raid group
-        raid_group_drive_root = group.find(namespace_uri_template['CLAR'] % ('Disks'))
-        location_list = []
-        for disk in raid_group_drive_root:
-            bus = None
-            enclosure = None
-            slot = None
-            for tag in disk:
-                if 'Bus' in tag.tag:
-                    bus = tag.text
-                elif 'Enclosure' in tag.tag:
-                    enclosure = tag.text
-                elif 'Slot' in tag.tag:
-                    slot = tag.text
+            # Find our LUNs and map them for later assignment to the RAID group
+            raid_group_lun_root = group.find(namespace_uri_template['CLAR'] % ('LUNs'))
+            for lun in raid_group_lun_root:
+                for tag in lun:
+                    if tag.tag.endswith('}WWN'):
+                        self.rg_to_lun_map[tag.text] = new_raid_group.group_number
+   
 
-            location_list.append('_'.join([str(bus),str(enclosure),str(slot)]))
+    def _locate_logical_luns(self):
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
+        luns_node = logical_root_node.find(namespace_uri_template['CLAR'] % ('LUNs'))
 
-
-        # Re-extract the drives from the DB that ar in the locations and set their RAID ID
-        raid_group_drives = DBConfig.session.query(DBConfig.Drive).filter(DBConfig.Drive.Location.in_(location_list))
-        for drive in raid_group_drives.all():
-            drive.RaidID = new_raidgroup.RaidID
-
-        DBConfig.session.commit()
-
-        # Extract our LUNs and just keep the mapping for later insertion when we create them
-        raidgroup_lun_root = group.find(namespace_uri_template['CLAR'] % ('LUNs'))
-        for lun in raidgroup_lun_root:
+        for lun in luns_node:
+            new_lun = db_layer.LUN()
             for tag in lun:
-                if tag.tag.endswith('}WWN'):
-                    lun_wwn_map[tag.text] = new_raidgroup.RaidGroupID
-
-    # LUNs
-    luns = logical_root_node.find(namespace_uri_template['CLAR'] % ('LUNs'))
-    for lun in luns:
-        alu = None
-        name = None
-        wwn = None
-        state = None
-        capacity = None
-        ownership = None
-        default_owner = None
-        read_cache_enabled = None
-        write_cache_enabled = None
-
-        for tag in lun:
-            if tag.attrib['type'] == 'Property':
-                if tag.tag.endswith('}Number'):
-                    alu = int(tag.text)
-                elif '}Name' in tag.tag:
-                    name = tag.text
-                elif 'WWN' in tag.tag:
-                    wwn = tag.text
-                elif '}State' in tag.tag:
-                    state = tag.text
-                elif '}Capacity' in tag.tag:
-                    capacity = int(tag.text) * array_block_size
-                elif 'CurrentOwner' in tag.tag:
+                if tag.tag.endswith('Number'):
+                    new_lun.alu = int(tag.text)
+                elif tag.tag.endswith('}Name'):
+                    new_lun.name = tag.text
+                elif tag.tag.endswith('WWN'):
+                    new_lun.wwn = tag.text
+                elif tag.tag.endswith('}State'):
+                    new_lun.state = tag.text
+                elif tag.tag.endswith('}Capacity'):
+                    new_lun.capacity = int(tag.text) * emc_block_size
+                elif tag.tag.endswith('CurrentOwner'):
                     if int(tag.text) == 2:
-                        ownership = 'B'
+                        new_lun.current_owner = 'B'
                     else:
-                        ownership = 'A'
-                elif 'DefaultOwner' in tag.tag:
+                        new_lun.current_owner = 'A'
+                elif tag.tag.endswith('DefaultOwner'):
                     if int(tag.text) == 2:
-                        default_owner = 'B'
+                        new_lun.default_owner='B'
                     else:
-                        default_owner = 'A'
-                elif 'ReadCacheEnabled' in tag.tag:
+                        new_lun.default_owner='A'
+                elif tag.tag.endswith('ReadCacheEnabled'):
                     if tag.text == 'true':
-                        read_cache_enabled = 1
+                        new_lun.is_read_cache_enabled = 1
                     else:
-                        read_cache_enabled = 0
-                elif 'WriteCacheEnabled' in tag.tag:
+                        new_lun.is_read_cache_enabled = 0
+                elif tag.tag.endswith('WriteCacheEnabled'):
                     if tag.text == 'true':
-                        write_cache_enabled = 1
+                        new_lun.is_write_cache_enabled = 1
                     else:
-                        write_cache_enabled = 0
-                        
-        new_lun = DBConfig.LUN(alu,name,wwn,state,capacity,ownership,default_owner,read_cache_enabled,write_cache_enabled)
-        DBConfig.session.add(new_lun)
+                        new_lun.is_write_cache_enabled = 0
 
-        raidgroup = DBConfig.session.query(DBConfig.RAIDGroup).filter(DBConfig.RAIDGroup.RaidGroupID==lun_wwn_map[wwn]).one()
-        raidgroup.luns.append(new_lun)
+            self.dbconn.add(new_lun)
 
-    DBConfig.session.commit()
+            # Update the RAID group config with this lun
+            raid_group = self.dbconn.query(db_layer.RAIDGroup).filter(
+                                      db_layer.RAIDGroup.group_number==self.rg_to_lun_map[new_lun.wwn]).first()
 
-    # Handle Metaluns, they exist in the luns table, but have a couple flags set.
-    metaluns = logical_root_node.find('.//{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}MetaLUNInstances')
-    for meta in metaluns:
+            raid_group.luns.append(new_lun)
 
-        alu = None
-        name = None
-        wwn = None
-        state = None
-        capacity = None
-        ownership = None
-        default_owner = None
-        for tag in meta:
-            if tag.attrib['type'] == 'Property':
-                if tag.tag.endswith('}Number'):
-                    alu = int(tag.text)
-                elif '}Name' in tag.tag:
-                    name = tag.text
-                elif 'WWN' in tag.tag:
-                    wwn = tag.text
-                elif '}State' in tag.tag:
-                    state = tag.text
-                elif 'Capacity' in tag.tag:
-                    capacity = int(tag.text) * array_block_size
-                elif 'CurrentOwner' in tag.tag:
+            self.dbconn.commit()
+
+    def _locate_meta_luns(self):
+        # MetaLUNs are added into the LUNs table, but have the isMeta,
+        # isMetaHead, and MetaHead properties set        
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
+        metaluns = logical_root_node.find('.//{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}MetaLUNInstances')
+
+        if metaluns is None:   # If there aren't any metas, we just bail
+            return    
+
+        for meta in metaluns:
+            new_meta_head = db_layer.LUN()
+            new_meta_head.is_meta_head = 1
+            for tag in meta:
+                if tag.tag.endswith('Number'):
+                    new_meta_head.alu = int(tag.text)
+                elif tag.tag.endswith('}Name'):
+                    new_meta_head.name = tag.text
+                elif tag.tag.endswith('WWN'):
+                    new_meta_head.wwn = tag.text
+                elif tag.tag.endswith('}State'):
+                    new_meta_head.state = tag.text
+                elif tag.tag.endswith('}Capacity'):
+                    new_meta_head.capacity = int(tag.text) * emc_block_size
+                elif tag.tag.endswith('CurrentOwner'):
                     if int(tag.text) == 2:
-                        ownership = 'B'
+                        new_meta_head.current_owner = 'B'
                     else:
-                        ownership = 'A'
-                elif 'DefaultOwner' in tag.tag:
+                        new_meta_head.current_owner = 'A'
+                elif tag.tag.endswith('DefaultOwner'):
                     if int(tag.text) == 2:
-                        default_owner = 'B'
+                        new_meta_head.default_owner='B'
                     else:
-                        default_owner = 'A'
+                        new_meta_head.default_owner='A'
 
-        # Add the LUN
-        new_lun = DBConfig.LUN(alu,name,wwn,state,capacity,ownership,default_owner,-1,-1,1)
-        DBConfig.session.add(new_lun)
-        # Figger out the RAID group we're in, if at all?
-        if wwn in lun_wwn_map:
-            raidgroup = DBConfig.session.query(DBConfig.RAIDGroup).filter(DBConfig.RAIDGroup.RaidGroupID==lun_wwn_map[wwn]).one()
-            raidgroup.luns.append(new_lun)
+            self.dbconn.add(new_meta_head)
+            
+            if new_meta_head.wwn in self.rg_to_lun_map:
+                raid_group = self.dbconn.query(db_layer.RAIDGroup).filter(
+                                      db_layer.RAIDGroup.group_number==self.rg_to_lun_map[new_meta_head.wwn]).first()
+           
+                raid_group.luns.append(new_meta_head)
 
-        DBConfig.session.commit()
+            self.dbconn.commit()
 
-        # Now we find our components
-        component_luns = meta.findall('/'.join((namespace_uri_template['CLAR'] % ('Components'),
+            component_luns = meta.findall('/'.join((namespace_uri_template['CLAR'] % ('Components'),
                                       namespace_uri_template['CLAR'] % ('Component'),
                                       namespace_uri_template['CLAR'] % ('LUNs'))))
 
-        for lun in component_luns:
-            wwns = lun.findall('.//' + namespace_uri_template['CLAR'] % ('WWN'))
-            for wwn in wwns:
-                member_lun = DBConfig.session.query(DBConfig.LUN).filter(DBConfig.LUN.WWN==wwn.text).one()
-                member_lun.isMetaMember = 1
+            for lun in component_luns:
+                wwns = lun.findall('.//' + namespace_uri_template['CLAR'] % ('WWN'))
+                for wwn in wwns:
+                    member_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==wwn.text).one()
+                    member_lun.is_meta_member = 1
+                    member_lun.meta_head = new_meta_head.wwn
 
-        DBConfig.session.commit()
+                self.dbconn.commit()
 
-    # Find our Connected HBAs
-    connectedhbas = logical_root_node.find(namespace_uri_template['CLAR'] % ('ConnectedHBAs'))
-    for connectedhba in connectedhbas:
+    def _locate_connected_hbas(self):
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
+        connected_hbas = logical_root_node.find(namespace_uri_template['CLAR']
+                % ('ConnectedHBAs'))
 
-        hostid = connectedhba.find('/'.join((namespace_uri_template['CLAR'] % ('AttachedSystems'),
+        for hba in connected_hbas:
+
+            hostid = hba.find('/'.join((namespace_uri_template['CLAR'] % ('AttachedSystems'),
                                             namespace_uri_template['CLAR'] % ('Server'),
                                             namespace_uri_template['CLAR'] % ('HostID'))))
 
-        wwn = connectedhba.find(namespace_uri_template['CLAR'] % ('WWN'))
-        adapter = DBConfig.HostWWN(wwn.text)
-        DBConfig.session.add(adapter)
-        server = DBConfig.session.query(DBConfig.Host).filter(DBConfig.Host.HostID==hostid.text).one()
-        server.WWNs.append(adapter)
+            wwn = hba.find(namespace_uri_template['CLAR'] % ('WWN'))
+            adapter = db_layer.HostWWN()
+            adapter.wwn = wwn.text
+            self.dbconn.add(adapter)
 
-    DBConfig.session.commit()
+            server = self.dbconn.query(db_layer.Host).filter(db_layer.Host.id==hostid.text).one()
+            server.wwns.append(adapter)
 
-    # Storage Groups
-    #  These are a bit ugly, particularly because of all of the relational references.  Hopefully we can do the necessary
-    #  Processing easily
+        self.dbconn.commit()
 
-    storage_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('StorageGroups'))
-    for group in storage_groups:
-        storage_group_name = None
-        storage_group_wwn = None
-        for tag in group:
-            if tag.attrib['type'] == 'Property':
-                if 'Name' in tag.tag:
-                    storage_group_name = tag.text
-                elif 'WWN' in tag.tag:
-                    storage_group_wwn = tag.text
+  
+    def _locate_storage_groups(self):
+        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
+        storage_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('StorageGroups'))
 
-        new_storage_group = DBConfig.StorageGroup(storage_group_name,storage_group_wwn)
-        DBConfig.session.add(new_storage_group)
-        DBConfig.session.commit()
+        for group in storage_groups:
+            new_storage_group = db_layer.StorageGroup()
 
-        hba_connections = group.findall('.//'+ namespace_uri_template['CLAR'] % ('ConnectedHBA') +
-                                        '/' + namespace_uri_template['CLAR'] % ('WWN'))
+            for tag in group:
+                if tag.tag.endswith('Name'):
+                    new_storage_group.name = tag.text
+                elif tag.tag.endswith('WWN'):
+                    new_storage_group.wwn = tag.text
 
-        if hba_connections is not None:
-            for connection in hba_connections:
-                server = DBConfig.session.query(DBConfig.Host).filter(DBConfig.HostWWN.HostWWN==connection.text).all()
-                newconn = DBConfig.SGHost(server[0].HostID,new_storage_group.SGWWN)
-                DBConfig.session.add(newconn)
-                new_storage_group.SGHost.append(newconn)
+            if new_storage_group.name.startswith('~'): 
+                continue
 
-        DBConfig.session.commit()
+            self.dbconn.add(new_storage_group)
+            self.dbconn.commit()
 
-        lu_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('LUs') + '/' + namespace_uri_template['CLAR'] % ('LU'))
-        if lu_connections is not None:
-            for lu in lu_connections:
-                wwn = None
-                hlu = None
-                for lunconn in lu:
-                    if 'WWN' in lunconn.tag:
-                        wwn = lunconn.text
-                    if 'Virtual' in lunconn.tag:
-                        hlu = int(lunconn.text)
+            # find all our hosts and add them to the storage group
+            sg_hba_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('ConnectedHBA') +
+                                                '/' + namespace_uri_template['CLAR'] % ('WWN'))
 
-                new_storage_group_lun = DBConfig.SGLUN(new_storage_group.SGWWN,hlu)
-                attached_lun = DBConfig.session.query(DBConfig.LUN).filter(DBConfig.LUN.WWN==wwn).all()
-                new_storage_group_lun.luns = attached_lun[0]
-                DBConfig.session.add(new_storage_group_lun)
+            if sg_hba_connections is not None:
+                for connection in sg_hba_connections:
+                    server = self.dbconn.query(db_layer.Host).filter(db_layer.HostWWN.host_id==db_layer.Host.id).filter(db_layer.HostWWN.wwn==connection.text).first()
 
-        DBConfig.session.commit()
+                    new_storage_group.host.append(server)
+                    self.dbconn.commit()
+
+            sg_lu_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('LUs') +
+                                              '/' + namespace_uri_template['CLAR'] % ('LU'))
+
+            if sg_lu_connections is not None:
+                for lu in sg_lu_connections:
+                    lun_wwn = None
+                    hlu = None
+
+                    for lun_connection in lu:
+
+                        if lun_connection.tag.endswith('WWN'):
+                            lun_wwn = lun_connection.text
+                        elif 'Virtual' in lun_connection.tag:
+                            hlu = int(lun_connection.text)
+
+                    # Set the LUN parameters and the storage group
+                    attached_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==lun_wwn).one()
+                    attached_lun.hlu = hlu
+                    new_storage_group.luns.append(attached_lun) 
+                    self.dbconn.commit()
+
+    def parse(self):
+        self._locate_server_physical()
+        self._locate_clariion_info()
+        self._locate_clariion_drives()
+        self._locate_logical_raidgroups()
+        self._locate_logical_luns()
+        self._locate_meta_luns()
+        self._locate_connected_hbas()
+        self._locate_storage_groups()
+
+
+
+if __name__ == "__main__":
+    print "Parsing san and nas"
+    clar = acXMLreader('./testdata/arrayconfig.sannas.xml')
+    clar.parse()
+    print "Parsing Nas only"
+    clar2 = acXMLreader('./testdata/arrayconfig.nasonly.xml')
+    clar2.parse()
