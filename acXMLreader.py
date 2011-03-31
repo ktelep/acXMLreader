@@ -345,13 +345,14 @@ class acXMLreader():
                                             namespace_uri_template['CLAR'] % ('Server'),
                                             namespace_uri_template['CLAR'] % ('HostID'))))
 
+            print "**** - FINDING SERVER"
+            server = self.dbconn.query(db_layer.Host).filter(db_layer.Host.id==hostid.text).one()
+	    print "FOUND SERVER!"
             wwn = hba.find(namespace_uri_template['CLAR'] % ('WWN'))
             adapter = db_layer.HostWWN()
             adapter.wwn = wwn.text
-            self.dbconn.add(adapter)
-
-            server = self.dbconn.query(db_layer.Host).filter(db_layer.Host.id==hostid.text).one()
             server.wwns.append(adapter)
+            self.dbconn.add(adapter)
 
         self.dbconn.commit()
 
