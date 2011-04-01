@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
-from xml.etree import ElementTree
 import dblayer as db_layer
 import re
+import sys
+from sqlalchemy.orm.exc import NoResultFound
+from xml.etree import ElementTree
 
 # EMC Namespaces
 namespace_uri_template = {"SAN": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_SAN_schema}%s",
@@ -14,6 +16,8 @@ emc_block_size = 512
 
 emc_rg_types = {'32':'HotSpare',
                 '1' : 'RAID5',
+                '0' : 'Unbound',
+                '4' : 'RAID1',
                 '64': 'RAID1/0'}
 
 class acXMLreader():
@@ -133,6 +137,9 @@ class acXMLreader():
         if clariion_root is not None:
             drives = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('Disks'))
             for drive in drives:
+		capacity = drive.find(namespace_uri_template['CLAR'] % ('UserCapacityInBlocks'))
+                if int(capacity.text) == 0:
+                    continue;
 
                 new_drive = db_layer.Drive()
 
@@ -169,7 +176,6 @@ class acXMLreader():
                 new_drive.frame = clariion
 
                 self.dbconn.add(new_drive)
-
             self.dbconn.commit()
 
     def _locate_logical_raidgroups(self):
@@ -218,12 +224,13 @@ class acXMLreader():
 	            drive.raidgroup = new_raid_group
             self.dbconn.commit()
 
-            # Find our LUNs and map them for later assignment to the RAID group
+            # Find our LUNs and map them for later assignment to the RAID group, note we have to check for unbound RAID groups
             raid_group_lun_root = group.find(namespace_uri_template['CLAR'] % ('LUNs'))
-            for lun in raid_group_lun_root:
-                for tag in lun:
-                    if tag.tag.endswith('}WWN'):
-                        self.rg_to_lun_map[tag.text] = new_raid_group.group_number
+            if raid_group_lun_root is not None:
+                for lun in raid_group_lun_root:
+                    for tag in lun:
+                        if tag.tag.endswith('}WWN'):
+                            self.rg_to_lun_map[tag.text] = new_raid_group.group_number
    
 
     def _locate_logical_luns(self):
@@ -310,6 +317,9 @@ class acXMLreader():
                     else:
                         new_meta_head.default_owner='A'
 
+                if new_meta_head.state == None:
+                    new_meta_head.state="Bound"
+
             self.dbconn.add(new_meta_head)
             
             if new_meta_head.wwn in self.rg_to_lun_map:
@@ -345,10 +355,17 @@ class acXMLreader():
                                             namespace_uri_template['CLAR'] % ('Server'),
                                             namespace_uri_template['CLAR'] % ('HostID'))))
 
-            print "**** - FINDING SERVER"
-            server = self.dbconn.query(db_layer.Host).filter(db_layer.Host.id==hostid.text).one()
-	    print "FOUND SERVER!"
             wwn = hba.find(namespace_uri_template['CLAR'] % ('WWN'))
+
+            if ':' in hostid.text:   # Unregistered HBA
+		continue
+
+            try:
+                server = self.dbconn.query(db_layer.Host).filter(db_layer.Host.id==hostid.text).one()
+            except NoResultFound, e:
+                print "Warning:  No HostID found for WWN: %s" % (wwn.text)
+                continue
+
             adapter = db_layer.HostWWN()
             adapter.wwn = wwn.text
             server.wwns.append(adapter)
@@ -419,12 +436,6 @@ class acXMLreader():
         self._locate_connected_hbas()
         self._locate_storage_groups()
 
-
-
 if __name__ == "__main__":
-    print "Parsing san and nas"
-    clar = acXMLreader('./testdata/arrayconfig.sannas.xml')
+    clar = acXMLreader(sys.argv[1])
     clar.parse()
-    print "Parsing Nas only"
-    clar2 = acXMLreader('./testdata/arrayconfig.nasonly.xml')
-    clar2.parse()
