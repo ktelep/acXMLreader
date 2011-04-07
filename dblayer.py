@@ -1,11 +1,8 @@
 from sqlalchemy import *
-from sqlalchemy.orm import mapper, sessionmaker, relation, backref
+from sqlalchemy.orm import mapper, relation, backref
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
-db = create_engine('sqlite:///:memory:', echo=True)
-#db = create_engine('sqlite:////tmp/test.db', echo=False)
-
 
 class RAIDGroup(Base):
     __tablename__ = 'RAIDGroup'
@@ -37,7 +34,6 @@ class StorageGroup(Base):
     category = Column('category', String(255))
     wwn = Column('SGWWN', String(255), primary_key=True)
     luns = relation('LUN', backref='storage_group')
-    host = relation('Host', backref='storage_group')
 
     def __init__(self):
         pass
@@ -83,6 +79,17 @@ class HostWWN(Base):
     def __repr__(self):
         return "HostWWN<'%s', '%s'>" % (wwn, host_id)
 
+FrameHost = Table(
+    'FrameHost', Base.metadata,
+    Column('FrameID', Integer, ForeignKey('Frame.FrameID')),
+    Column('HostID', String(60), ForeignKey('Host.HostID'))
+    )
+
+SGHost = Table(
+    'SGHost', Base.metadata,
+    Column('SGWWN', String(60), ForeignKey('StorageGroup.SGWWN')),
+    Column('HostID', String(60), ForeignKey('Host.HostID'))
+    )
 
 class Host(Base):
     __tablename__ = 'Host'
@@ -91,9 +98,9 @@ class Host(Base):
     name = Column('Name', String(60))
     ip = Column('IP', String(20))
     manual_registration = ('ManualReg', SMALLINT)
-    storage_group_wwn = Column('StorageGroup', String(255),
-                               ForeignKey('StorageGroup.SGWWN'))
 
+    frames = relation('Frame', secondary=FrameHost, backref='hosts')
+    storage_groups = relation('StorageGroup', secondary=SGHost, backref='hosts')
     def __init__(self):
         pass
 
@@ -173,7 +180,3 @@ class Drive(Base):
         return "Drive<'%s', '%s', '%s'>" % (
                 self.location, self.drive_type, str(self.capacity))
 
-
-Base.metadata.create_all(db)
-Session = sessionmaker(bind=db)
-session = Session()

@@ -1,7 +1,14 @@
 acXMLreader is an in-progress tool for parsing the output of EMC's Navisphere CLI arrayconfig command into usable datastructures and/or database tables.  
 
-This module is expected to be used as a building block in a reporting or configuration management tool, possibly with or without the SQLAlchemy backend.
-
 Requirements:
 SQLAlchemy 0.6.6
 SQLite 3
+
+History
+---------------
+This module was written out of the need to load Clariion information into an
+existing DataWarehouse application within my organization.  As such, you may
+notice that some of the tablenames/etc are not exactly "PEP8" compliant. 
+Future versions will hopefully drive a rewrite of some of those table
+definitions.
+

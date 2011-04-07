@@ -3,6 +3,8 @@
 import dblayer as db_layer
 import re
 import sys
+from sqlalchemy import *
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.exc import NoResultFound
 from xml.etree import ElementTree
 
@@ -23,12 +25,31 @@ emc_rg_types = {'32':'HotSpare',
 class acXMLreader():
     """reads and parses xml file into database structure"""
 
-    def __init__(self,array_config_xml=None):
+    sharedDB = None
+
+    def __init__(self,array_config_xml=None,is_shared_db=True,db_engine=None,db_debug=False):
+
+        # Setup our shared or non-shared DB connection
+        db = None
+        print db_engine
+        if not db_engine:  # We default to in-memory sqlite
+            db_engine = "sqlite:///:memory:"
+
+        if is_shared_db == True:
+            if not acXMLreader.sharedDB:
+                acXMLreader.sharedDB = create_engine(db_engine,echo=db_debug)
+            db = acXMLreader.sharedDB
+        else:
+            db = create_engine(db_engine,echo=db_debug)
+
+        # Run our database create and build our session
+        db_layer.Base.metadata.create_all(db)
+        Session = sessionmaker(bind=db)
+        self.dbconn = Session()
 
         self.array_config_xml=array_config_xml
         self.schema_major_version = None
         self.schema_minor_version = None
-        self.dbconn = db_layer.session
         self.frame_serial = None
         self.rg_to_lun_map = dict()
 
@@ -50,6 +71,9 @@ class acXMLreader():
         """
         Locate attached physical servers in the configuration
         """
+        # We need to keep track of our frame, so we can properly add it
+        clariion = self.dbconn.query(db_layer.Frame).filter(db_layer.Frame.serial_number==self.frame_serial).one()
+
         attached_servers = self.tree.find('.//' + namespace_uri_template['SAN'] % ('Servers'))
         for server in attached_servers:
             new_server = db_layer.Host()
@@ -66,7 +90,17 @@ class acXMLreader():
                     else:
                         new_server.manual_registration = 0
 
-            self.dbconn.add(new_server)
+            # Determine if this host is already in the table, if so we just set
+            # the new host to be the existing one so we can add the frame
+            # association
+            host_lookup = self.dbconn.query(db_layer.Host).filter(db_layer.Host.id==new_server.id)
+            if host_lookup.count() == 1:
+                new_server = host_lookup.one()
+            else :
+                self.dbconn.add(new_server)
+
+            # Add our frame association
+            new_server.frames.append(clariion)
             self.dbconn.commit()
     
     def _locate_clariion_info(self):
@@ -402,7 +436,7 @@ class acXMLreader():
                 for connection in sg_hba_connections:
                     server = self.dbconn.query(db_layer.Host).filter(db_layer.HostWWN.host_id==db_layer.Host.id).filter(db_layer.HostWWN.wwn==connection.text).first()
 
-                    new_storage_group.host.append(server)
+                    new_storage_group.hosts.append(server)
                     self.dbconn.commit()
 
             sg_lu_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('LUs') +
@@ -427,8 +461,8 @@ class acXMLreader():
                     self.dbconn.commit()
 
     def parse(self):
-        self._locate_server_physical()
         self._locate_clariion_info()
+        self._locate_server_physical()
         self._locate_clariion_drives()
         self._locate_logical_raidgroups()
         self._locate_logical_luns()
