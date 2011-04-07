@@ -3,8 +3,8 @@ from sqlalchemy.orm import mapper, sessionmaker, relation, backref
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
-#db = create_engine('sqlite:///:memory:', echo=True)
-db = create_engine('sqlite:////tmp/test.db', echo=False)
+db = create_engine('sqlite:///:memory:', echo=True)
+#db = create_engine('sqlite:////tmp/test.db', echo=False)
 
 
 class RAIDGroup(Base):
