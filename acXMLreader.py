@@ -9,10 +9,13 @@ from sqlalchemy.orm.exc import NoResultFound
 from xml.etree import ElementTree
 
 # EMC Namespaces
-namespace_uri_template = {"SAN": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_SAN_schema}%s",
-                          "CLAR": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}%s",
-                          "FILEMETADATA": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_Type_schema}%s"}
+old_namespace_uri_template = {"SAN": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_SAN_schema}%s",
+                              "CLAR": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}%s",
+                              "FILEMETADATA": "{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_Type_schema}%s"}
 
+new_namespace_uri_template = {"SAN": "{http://navisphere.clrcase.lab.emc.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_SAN_schema}%s",
+                              "CLAR": "{http://navisphere.clrcase.lab.emc.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}%s",
+                              "FILEMETADATA": "{http://navisphere.clrcase.lab.emc.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_Type_schema}%s"}
 
 emc_block_size = 512
 
@@ -52,6 +55,7 @@ class acXMLreader():
         self.schema_minor_version = None
         self.frame_serial = None
         self.rg_to_lun_map = dict()
+        self.ns_template = {}
 
         try: 
             self.tree = ElementTree.parse(self.array_config_xml)
@@ -59,8 +63,15 @@ class acXMLreader():
             print "Unable to read and/or access file %s" % (self.array_config_xml)
             exit()
 
-        schema_major = self.tree.find('.//' + namespace_uri_template['FILEMETADATA'] % ('MajorVersion'))
-        schema_minor = self.tree.find('.//' + namespace_uri_template['FILEMETADATA'] % ('MinorVersion'))
+        root = self.tree.getroot()
+        if 'clrcase' in root[0].tag:
+             self.ns_template = new_namespace_uri_template
+        else:
+             self.ns_template = old_namespace_uri_template
+
+        print './/' + self.ns_template['FILEMETADATA'] % ('MajorVersion')
+        schema_major = self.tree.find('.//' + self.ns_template['FILEMETADATA'] % ('MajorVersion'))
+        schema_minor = self.tree.find('.//' + self.ns_template['FILEMETADATA'] % ('MinorVersion'))
         self.schema_major_version = schema_major.text
         self.schema_minor_version = schema_minor.text
 
@@ -74,7 +85,7 @@ class acXMLreader():
         # We need to keep track of our frame, so we can properly add it
         clariion = self.dbconn.query(db_layer.Frame).filter(db_layer.Frame.serial_number==self.frame_serial).one()
 
-        attached_servers = self.tree.find('.//' + namespace_uri_template['SAN'] % ('Servers'))
+        attached_servers = self.tree.find('.//' + self.ns_template['SAN'] % ('Servers'))
         for server in attached_servers:
             new_server = db_layer.Host()
 
@@ -107,16 +118,16 @@ class acXMLreader():
         """
         Locate and create objects for base frame information and software
         """
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
         if clariion_root is not None:
             clar = db_layer.Frame()
 
             # Base info
-            serial_num = clariion_root.find(namespace_uri_template['CLAR'] % 'SerialNumber')
-            model = clariion_root.find(namespace_uri_template['CLAR'] % ('ModelNumber'))
-            hwm = clariion_root.find(namespace_uri_template['CLAR'] % ('HighWatermark'))
-            lwm = clariion_root.find(namespace_uri_template['CLAR'] % ('LowWatermark'))
-            wwn = clariion_root.find(namespace_uri_template['CLAR'] % ('WWN'))
+            serial_num = clariion_root.find(self.ns_template['CLAR'] % 'SerialNumber')
+            model = clariion_root.find(self.ns_template['CLAR'] % ('ModelNumber'))
+            hwm = clariion_root.find(self.ns_template['CLAR'] % ('HighWatermark'))
+            lwm = clariion_root.find(self.ns_template['CLAR'] % ('LowWatermark'))
+            wwn = clariion_root.find(self.ns_template['CLAR'] % ('WWN'))
 
             clar.serial_number = serial_num.text
             self.frame_serial = serial_num.text
@@ -126,10 +137,10 @@ class acXMLreader():
             clar.wwn = wwn.text
 
             # SP IP addresses
-            sps = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('StorageProcessors'))
+            sps = clariion_root.find(self.ns_template['CLAR'] % ('Physicals') + '/' + self.ns_template['CLAR'] % ('StorageProcessors'))
             for sp in sps:
-                ip = sp.find(namespace_uri_template['CLAR'] % ('IPAddress'))
-                name = sp.find(namespace_uri_template['CLAR'] % ('Name'))
+                ip = sp.find(self.ns_template['CLAR'] % ('IPAddress'))
+                name = sp.find(self.ns_template['CLAR'] % ('Name'))
                 if 'A' in name.text:
                     clar.spa_ip=ip.text
                 else:
@@ -139,15 +150,15 @@ class acXMLreader():
             self.dbconn.commit()
 
             # Installed Frame Software
-            softwares = clariion_root.find(namespace_uri_template['CLAR'] % ('Softwares'))
+            softwares = clariion_root.find(self.ns_template['CLAR'] % ('Softwares'))
             for installed_package in softwares:
-                name = installed_package.find(namespace_uri_template['CLAR'] % ('Name'))
+                name = installed_package.find(self.ns_template['CLAR'] % ('Name'))
 
                 if name.text.startswith('-'):
                     continue
 
-                ver = installed_package.find(namespace_uri_template['CLAR'] % ('Revision'))
-                status = installed_package.find(namespace_uri_template['CLAR'] % ('IsActive'))
+                ver = installed_package.find(self.ns_template['CLAR'] % ('Revision'))
+                status = installed_package.find(self.ns_template['CLAR'] % ('IsActive'))
 
                 if 'true' in status.text:
                     status = 'Active'
@@ -167,11 +178,11 @@ class acXMLreader():
     def _locate_clariion_drives(self):
         clariion = self.dbconn.query(db_layer.Frame).filter(db_layer.Frame.serial_number==self.frame_serial).one()
 
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
         if clariion_root is not None:
-            drives = clariion_root.find(namespace_uri_template['CLAR'] % ('Physicals') + '/' + namespace_uri_template['CLAR'] % ('Disks'))
+            drives = clariion_root.find(self.ns_template['CLAR'] % ('Physicals') + '/' + self.ns_template['CLAR'] % ('Disks'))
             for drive in drives:
-		capacity = drive.find(namespace_uri_template['CLAR'] % ('UserCapacityInBlocks'))
+		capacity = drive.find(self.ns_template['CLAR'] % ('UserCapacityInBlocks'))
                 if int(capacity.text) == 0:
                     continue;
 
@@ -213,9 +224,9 @@ class acXMLreader():
             self.dbconn.commit()
 
     def _locate_logical_raidgroups(self):
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
-        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))
-        raid_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('RAIDGroups'))
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))
+        raid_groups = logical_root_node.find(self.ns_template['CLAR'] % ('RAIDGroups'))
 
         for group in raid_groups:
 
@@ -236,7 +247,7 @@ class acXMLreader():
             self.dbconn.commit()
 
             # Locate associated disks
-            drive_root = group.find(namespace_uri_template['CLAR'] % ('Disks'))
+            drive_root = group.find(self.ns_template['CLAR'] % ('Disks'))
             location_list = []
             for disk in drive_root:
                 bus = None
@@ -259,7 +270,7 @@ class acXMLreader():
             self.dbconn.commit()
 
             # Find our LUNs and map them for later assignment to the RAID group, note we have to check for unbound RAID groups
-            raid_group_lun_root = group.find(namespace_uri_template['CLAR'] % ('LUNs'))
+            raid_group_lun_root = group.find(self.ns_template['CLAR'] % ('LUNs'))
             if raid_group_lun_root is not None:
                 for lun in raid_group_lun_root:
                     for tag in lun:
@@ -268,9 +279,9 @@ class acXMLreader():
    
 
     def _locate_logical_luns(self):
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
-        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
-        luns_node = logical_root_node.find(namespace_uri_template['CLAR'] % ('LUNs'))
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))    
+        luns_node = logical_root_node.find(self.ns_template['CLAR'] % ('LUNs'))
 
         for lun in luns_node:
             new_lun = db_layer.LUN()
@@ -319,8 +330,8 @@ class acXMLreader():
     def _locate_meta_luns(self):
         # MetaLUNs are added into the LUNs table, but have the isMeta,
         # isMetaHead, and MetaHead properties set        
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
-        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))    
         metaluns = logical_root_node.find('.//{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}MetaLUNInstances')
 
         if metaluns is None:   # If there aren't any metas, we just bail
@@ -364,12 +375,12 @@ class acXMLreader():
 
             self.dbconn.commit()
 
-            component_luns = meta.findall('/'.join((namespace_uri_template['CLAR'] % ('Components'),
-                                      namespace_uri_template['CLAR'] % ('Component'),
-                                      namespace_uri_template['CLAR'] % ('LUNs'))))
+            component_luns = meta.findall('/'.join((self.ns_template['CLAR'] % ('Components'),
+                                      self.ns_template['CLAR'] % ('Component'),
+                                      self.ns_template['CLAR'] % ('LUNs'))))
 
             for lun in component_luns:
-                wwns = lun.findall('.//' + namespace_uri_template['CLAR'] % ('WWN'))
+                wwns = lun.findall('.//' + self.ns_template['CLAR'] % ('WWN'))
                 for wwn in wwns:
                     member_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==wwn.text).one()
                     member_lun.is_meta_member = 1
@@ -378,18 +389,18 @@ class acXMLreader():
                 self.dbconn.commit()
 
     def _locate_connected_hbas(self):
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
-        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
-        connected_hbas = logical_root_node.find(namespace_uri_template['CLAR']
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))    
+        connected_hbas = logical_root_node.find(self.ns_template['CLAR']
                 % ('ConnectedHBAs'))
 
         for hba in connected_hbas:
 
-            hostid = hba.find('/'.join((namespace_uri_template['CLAR'] % ('AttachedSystems'),
-                                            namespace_uri_template['CLAR'] % ('Server'),
-                                            namespace_uri_template['CLAR'] % ('HostID'))))
+            hostid = hba.find('/'.join((self.ns_template['CLAR'] % ('AttachedSystems'),
+                                            self.ns_template['CLAR'] % ('Server'),
+                                            self.ns_template['CLAR'] % ('HostID'))))
 
-            wwn = hba.find(namespace_uri_template['CLAR'] % ('WWN'))
+            wwn = hba.find(self.ns_template['CLAR'] % ('WWN'))
 
             if ':' in hostid.text:   # Unregistered HBA
 		continue
@@ -409,9 +420,9 @@ class acXMLreader():
 
   
     def _locate_storage_groups(self):
-        clariion_root = self.tree.find('.//' + namespace_uri_template['CLAR'] % ('CLARiiON'))
-        logical_root_node = clariion_root.find(namespace_uri_template['CLAR'] % ('Logicals'))    
-        storage_groups = logical_root_node.find(namespace_uri_template['CLAR'] % ('StorageGroups'))
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))    
+        storage_groups = logical_root_node.find(self.ns_template['CLAR'] % ('StorageGroups'))
 
         for group in storage_groups:
             new_storage_group = db_layer.StorageGroup()
@@ -429,8 +440,8 @@ class acXMLreader():
             self.dbconn.commit()
 
             # find all our hosts and add them to the storage group
-            sg_hba_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('ConnectedHBA') +
-                                                '/' + namespace_uri_template['CLAR'] % ('WWN'))
+            sg_hba_connections = group.findall('.//' + self.ns_template['CLAR'] % ('ConnectedHBA') +
+                                                '/' + self.ns_template['CLAR'] % ('WWN'))
 
             if sg_hba_connections is not None:
                 for connection in sg_hba_connections:
@@ -439,8 +450,8 @@ class acXMLreader():
                     new_storage_group.hosts.append(server)
                     self.dbconn.commit()
 
-            sg_lu_connections = group.findall('.//' + namespace_uri_template['CLAR'] % ('LUs') +
-                                              '/' + namespace_uri_template['CLAR'] % ('LU'))
+            sg_lu_connections = group.findall('.//' + self.ns_template['CLAR'] % ('LUs') +
+                                              '/' + self.ns_template['CLAR'] % ('LU'))
 
             if sg_lu_connections is not None:
                 for lu in sg_lu_connections:
