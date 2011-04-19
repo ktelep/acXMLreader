@@ -20,7 +20,9 @@ new_namespace_uri_template = {"SAN": "{http://navisphere.clrcase.lab.emc.com/doc
 emc_block_size = 512
 
 emc_rg_types = {'32':'HotSpare',
+                '6':'HotSpare',
                 '1' : 'RAID5',
+                '7' : 'RAID5',
                 '0' : 'Unbound',
                 '4' : 'RAID1',
                 '64': 'RAID1/0'}
@@ -34,7 +36,6 @@ class acXMLreader():
 
         # Setup our shared or non-shared DB connection
         db = None
-        print db_engine
         if not db_engine:  # We default to in-memory sqlite
             db_engine = "sqlite:///:memory:"
 
@@ -69,7 +70,6 @@ class acXMLreader():
         else:
              self.ns_template = old_namespace_uri_template
 
-        print './/' + self.ns_template['FILEMETADATA'] % ('MajorVersion')
         schema_major = self.tree.find('.//' + self.ns_template['FILEMETADATA'] % ('MajorVersion'))
         schema_minor = self.tree.find('.//' + self.ns_template['FILEMETADATA'] % ('MinorVersion'))
         self.schema_major_version = schema_major.text
@@ -332,7 +332,7 @@ class acXMLreader():
         # isMetaHead, and MetaHead properties set        
         clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
         logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))    
-        metaluns = logical_root_node.find('.//{http://navisphere.us.dg.com/docs/Schemas/CommonClariionSchema/01/Common_CLARiiON_schema}MetaLUNInstances')
+        metaluns = logical_root_node.find('.//' + self.ns_template['CLAR'] % ('MetaLUNInstances'))
 
         if metaluns is None:   # If there aren't any metas, we just bail
             return    
