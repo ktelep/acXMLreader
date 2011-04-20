@@ -55,8 +55,9 @@ class acXMLreader():
         self.schema_major_version = None
         self.schema_minor_version = None
         self.frame_serial = None
-        self.rg_to_lun_map = dict()
+        self.rg_to_lun_map = {}
         self.ns_template = {}
+        self.snapshots = {}
 
         try: 
             self.tree = ElementTree.parse(self.array_config_xml)
@@ -433,7 +434,7 @@ class acXMLreader():
                 elif tag.tag.endswith('WWN'):
                     new_storage_group.wwn = tag.text
 
-            if new_storage_group.name.startswith('~'): 
+            if new_storage_group.name.startswith('~') or new_storage_group.name.startswith('FAR_'): 
                 continue
 
             self.dbconn.add(new_storage_group)
@@ -466,10 +467,26 @@ class acXMLreader():
                             hlu = int(lun_connection.text)
 
                     # Set the LUN parameters and the storage group
-                    attached_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==lun_wwn).one()
-                    attached_lun.hlu = hlu
-                    new_storage_group.luns.append(attached_lun) 
+                    if lun_wwn not in self.snapshots:
+                        attached_lun = self.dbconn.query(db_layer.LUN).filter(db_layer.LUN.wwn==lun_wwn).one()
+                        attached_lun.hlu = hlu
+                        new_storage_group.luns.append(attached_lun) 
+
                     self.dbconn.commit()
+
+    def _locate_snapshot_luns(self):
+        # We're currently throwing these away
+        # TODO: properly handle snapshots with a table in the DB
+        clariion_root = self.tree.find('.//' + self.ns_template['CLAR'] % ('CLARiiON'))
+        logical_root_node = clariion_root.find(self.ns_template['CLAR'] % ('Logicals'))
+        snapshots = logical_root_node.findall('.//' + self.ns_template['CLAR'] % ('SnapViews') + 
+                                             '/' + self.ns_template['CLAR'] % ('SnapView') + 
+                                             '/' + self.ns_template['CLAR'] % ('SnapShots') +
+                                             '/' + self.ns_template['CLAR'] % ('SnapShot'))
+
+        for snap in snapshots:
+            wwn = snap.findtext('./' + self.ns_template['CLAR'] % ('WWN'))
+            self.snapshots[wwn] = 1
 
     def parse(self):
         self._locate_clariion_info()
@@ -478,6 +495,7 @@ class acXMLreader():
         self._locate_logical_raidgroups()
         self._locate_logical_luns()
         self._locate_meta_luns()
+        self._locate_snapshot_luns()
         self._locate_connected_hbas()
         self._locate_storage_groups()
 
